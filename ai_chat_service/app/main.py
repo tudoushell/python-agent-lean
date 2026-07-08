@@ -4,9 +4,9 @@ from starlette.responses import StreamingResponse
 from ai_chat_service.app.core.config import get_settings
 from ai_chat_service.app.core.exception import global_exception_handler, app_exception_handler, AppException
 from ai_chat_service.app.core.logging_config import setup_logging
+from ai_chat_service.app.llm_service import LLMService
 from ai_chat_service.app.middleware.request_log import RequestLogMiddleware
 from ai_chat_service.app.schemas import ChatResponse, SummaryResponse
-from ai_chat_service.app.llm_service import LLMService
 
 api = FastAPI(
     title="AI Chat Service API"
@@ -57,6 +57,24 @@ def chat_with_scene(message: str, scene: str | None = None):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+
 @api.get("/chat-summary", response_model=SummaryResponse)
 def summary(message: str):
     return llm_service.summary(message)
+
+
+@api.get("/chat-summary-schema", response_model=SummaryResponse)
+def summary(message: str):
+    return llm_service.summary_structured(message)
+
+
+@api.get("/chat-mem")
+def chat_with_memory(message: str, scene: str | None = None, id: str | None = None):
+    def event_generator():
+        try:
+            for chunk in llm_service.chat_stream_with_memory(message, scene, id):
+                yield chunk
+        except Exception as e:
+            yield f"data: {str(e)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

@@ -4,5 +4,5 @@
 
 请严格返回 JSON，字段只能包含：
 - summary
-- key_points
+- keyPoints
 - suggestions

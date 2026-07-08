@@ -1,21 +1,25 @@
 import logging
-from openai import OpenAI
 from typing import Generator
 
+from openai import OpenAI
 from pydantic import ValidationError
 
 from ai_chat_service.app.core.config import Settings
 from ai_chat_service.app.core.exception import AppException
+from ai_chat_service.app.core.json_utils import extract_json_object
 from ai_chat_service.app.prompt.prompt_service import PromptService
 from ai_chat_service.app.schemas import SummaryResponse
+from ai_chat_service.app.services.memory_service import MemoryService
 
 logger = logging.getLogger(__name__)
+
 
 class LLMService:
     def __init__(self):
         self.settings = Settings()
         self.prompt_service = PromptService()
         self.client = OpenAI(base_url=self.settings.base_url, api_key=self.settings.api_key)
+        self.memory_service = MemoryService(max_messages=20)
 
     def chat(self, message: str) -> str:
         logger.info("calling llm, model=%s", self.settings.model_name)
@@ -36,7 +40,7 @@ class LLMService:
             if chunk.type == 'response.output_text.delta':
                 yield chunk.delta
 
-    def stream_chat_by_scene(self, message:str, scene: str|None = None) -> Generator[str, None, None]:
+    def stream_chat_by_scene(self, message: str, scene: str | None = None) -> Generator[str, None, None]:
         if not message or not message.strip():
             raise AppException(
                 message="消息不能为空",
@@ -63,7 +67,7 @@ class LLMService:
             if event.type == "response.output_text.delta":
                 yield event.delta
 
-    #汇总聊天，返回指定结构
+    # 汇总聊天，返回指定结构
     def summary(self, message: str) -> SummaryResponse:
         if not message or not message.strip():
             raise AppException(
@@ -85,7 +89,7 @@ class LLMService:
             instructions=prompt_template.system_prompt,
             input=user_prompt,
             text={
-                "format" : {
+                "format": {
                     "type": "json_schema",
                     "name": "summary_response",
                     "schema": SummaryResponse.model_json_schema(),
@@ -102,3 +106,141 @@ class LLMService:
                 code="INVALID_MESSAGE",
                 status_code=400,
             )
+
+    def summary_structured(self, message: str) -> SummaryResponse:
+        if not message or not message.strip():
+            raise AppException(
+                message="消息不能为空",
+                code="INVALID_MESSAGE",
+                status_code=400,
+            )
+        prompt_template = self.prompt_service.get_template("summary_schema")
+        user_prompt = self.prompt_service.render_user_prompt(prompt_template.user_template, message)
+
+        logger.info(
+            "calling llm structured summary, model=%s, scene=%s",
+            self.settings.model_name,
+            prompt_template.scene,
+        )
+
+        first_output = self.client.responses.create(
+            model=self.settings.model_name,
+            instructions=prompt_template.system_prompt,
+            input=user_prompt
+        )
+        try:
+            return self._parse_summary_output(first_output)
+        except Exception as first_error:
+            logger.warning("first summary parse failed, retrying once, error: %s", first_error)
+
+            retry_prompt = self._build_summary_retry_prompty(
+                original_message=message,
+                bad_output=first_error,
+                error_message=str(first_error),
+            )
+
+            second_output = self._call_text(system_prompt=prompt_template.system_prompt,
+                                            user_prompt=retry_prompt)
+            try:
+                return self._parse_summary_output(second_output)
+            except Exception as second_error:
+                logger.exception("summary parse failed after retry")
+                raise AppException(
+                    message="模型返回结构解析失败，请稍后重试",
+                    code="STRUCTURED_OUTPUT_PARSE_ERROR",
+                    status_code=500,
+                ) from second_error
+
+    def chat_stream_with_memory(self,
+                                message: str,
+                                scene: str | None = None,
+                                conversation_id: str | None = None,
+                                ) -> Generator[str, None, None]:
+        self._validate_message(message)
+        conversation_id = self._validate_conversation_id(conversation_id)
+        prompt_template = self.prompt_service.get_template(scene)
+        user_prompt = self.prompt_service.render_user_prompt(prompt_template.user_template, message)
+
+        history_message = self.memory_service.get_message(conversation_id)
+
+        input_message = [
+            *history_message,
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ]
+
+        stream = self.client.responses.create(model=self.settings.model_name,
+                                              instructions=prompt_template.system_prompt,
+                                              input=input_message,
+                                              stream=True)
+        answer_parts: list[str] = []
+        for event in stream:
+            if event.type == 'response.output_text.delta':
+                answer_parts.append(event.delta)
+                yield event.delta
+        result_answer = "".join(answer_parts)
+
+        self.memory_service.add_user_message(conversation_id, user_prompt)
+        self.memory_service.add_assistant_message(conversation_id, result_answer)
+
+        logger.info(
+            f"conversation id: {conversation_id}, history_message: {self.memory_service.get_message(conversation_id)}")
+
+    def _validate_conversation_id(self, conversation_id: str) -> str:
+        if not conversation_id or not conversation_id.strip():
+            return "1"
+        return conversation_id
+
+    def _validate_message(self, message: str):
+        if not message or not message.strip():
+            raise AppException(
+                message="消息不能为空",
+                code="INVALID_MESSAGE",
+                status_code=400,
+            )
+
+    def _call_text(self, system_prompt: str, user_prompt: str) -> str:
+        response = self.client.responses.create(
+            model=self.settings.model_name,
+            instructions=system_prompt,
+            input=user_prompt,
+        )
+        return response.output_text
+
+    def _parse_summary_output(self, output_text: str) -> SummaryResponse:
+        data = extract_json_object(output_text)
+        try:
+            return SummaryResponse.model_validate(data)
+        except ValidationError as e:
+            raise AppException(
+                message=f"模型返回 JSON 字段不符合要求：{e}",
+                code="SUMMARY_SCHEMA_VALIDATE_ERROR",
+                status_code=500,
+            ) from e
+
+    def _build_summary_retry_prompty(self,
+                                     original_message: str,
+                                     bad_output: str,
+                                     error_message: str, ) -> str:
+        return f"""
+                    上一次输出不符合 JSON 结构要求，请重新生成。
+                    
+                    原始内容：
+                    {original_message}
+                    
+                    上一次错误输出：
+                    {bad_output}
+                    
+                    解析错误：
+                    {error_message}
+                    
+                    请严格只返回如下 JSON 对象，不要 Markdown，不要代码块，不要解释：
+                    
+                    {{
+                      "summary": "一句话总结",
+                      "keyPoints": ["核心要点1", "核心要点2", "核心要点3"],
+                      "suggestions": ["建议1", "建议2"]
+                    }}
+                """.strip()

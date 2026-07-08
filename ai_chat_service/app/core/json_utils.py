@@ -1,8 +1,11 @@
 import json
 import re
 from typing import Any
+import logging
 
 from ai_chat_service.app.core.exception import AppException
+
+logger = logging.getLogger(__name__)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -20,6 +23,9 @@ def extract_json_object(text: str) -> dict[str, Any]:
 
     try:
         cleaned = json.loads(cleaned)
+        if isinstance(cleaned, dict):
+            logger.info(f"parsed json object: {str(cleaned)}")
+            return cleaned
     except json.decoder.JSONDecodeError:
         pass
 
