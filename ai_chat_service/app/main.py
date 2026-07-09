@@ -78,3 +78,15 @@ def chat_with_memory(message: str, scene: str | None = None, id: str | None = No
             yield f"data: {str(e)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@api.get("/chat-tools")
+def chat_with_tools(message: str):
+    def event_generator():
+        try:
+            for chunk in llm_service.tool_chat(message):
+                yield chunk
+        except Exception as e:
+            yield f"data: {str(e)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
