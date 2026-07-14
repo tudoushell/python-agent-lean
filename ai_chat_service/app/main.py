@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from starlette.responses import StreamingResponse
 
+from ai_chat_service.app.api.order_api import router as order_router
 from ai_chat_service.app.core.config import get_settings
 from ai_chat_service.app.core.exception import global_exception_handler, app_exception_handler, AppException
 from ai_chat_service.app.core.logging_config import setup_logging
@@ -19,6 +20,7 @@ setup_logging(settings.log_level)
 api.add_middleware(RequestLogMiddleware)
 api.add_exception_handler(AppException, app_exception_handler)
 api.add_exception_handler(Exception, global_exception_handler)
+api.include_router(order_router)
 
 llm_service = LLMService()
 

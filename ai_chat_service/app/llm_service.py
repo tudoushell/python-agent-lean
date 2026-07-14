@@ -259,7 +259,7 @@ class LLMService:
             result.append(e)
             yield e
         self.memory_service.add_user_message(conversation_id, user_prompt)
-        self.memory_service.add_assistant_message(conversation_id, result)
+        self.memory_service.add_assistant_message(conversation_id, "".join(result))
 
     def _handle_tool_calls(self,
                            input_message: list,
@@ -276,6 +276,7 @@ class LLMService:
             # ResponseFunctionToolCall(arguments='{"order_id":"OD1001"}',
             # call_id='call_cs22vmkr', name='query_order',
             # type='function_call', id='fc_resp_111002_0', namespace=None, status='completed')
+            logger.info(f"calling llm with tools, tool is {item.name}")
             tool_result = self._execute_tool_call(item)
             next_input.append({
                 "type": "function_call_output",
